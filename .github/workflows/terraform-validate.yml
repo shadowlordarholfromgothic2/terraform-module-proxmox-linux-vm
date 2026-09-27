@@ -59,6 +59,24 @@ jobs:
       - name: terraform validate
         run: terraform validate -no-color
 
+      # The suite mocks the proxmox provider, so it needs no node and no API
+      # token — but it does need the provider installed, because a mocked
+      # provider is still built from the real schema. Run on the matrix rather
+      # than once: the suite uses mock_provider, and the floor has to support it.
+      - name: terraform test
+        run: terraform test -no-color
+
+      # Each example is its own root module, so the init above does not cover
+      # it. Validate only — plan would reach the Proxmox API.
+      - name: terraform validate examples
+        run: |
+          for dir in examples/*/; do
+            echo "::group::${dir}"
+            terraform -chdir="${dir}" init -backend=false -input=false -no-color
+            terraform -chdir="${dir}" validate -no-color
+            echo "::endgroup::"
+          done
+
   opentofu:
     name: opentofu
     runs-on: ubuntu-latest
@@ -75,6 +93,18 @@ jobs:
 
       - name: tofu validate
         run: tofu validate -no-color
+
+      - name: tofu test
+        run: tofu test -no-color
+
+      - name: tofu validate examples
+        run: |
+          for dir in examples/*/; do
+            echo "::group::${dir}"
+            tofu -chdir="${dir}" init -backend=false -input=false -no-color
+            tofu -chdir="${dir}" validate -no-color
+            echo "::endgroup::"
+          done
 
   tflint:
     name: tflint

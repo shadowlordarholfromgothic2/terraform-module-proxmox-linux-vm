@@ -7,7 +7,7 @@
   "bump-patch-for-minor-pre-major": false,
   "packages": {
     ".": {
-      "package-name": "MODULE_NAME",
+      "package-name": "proxmox-linux-vm",
       "changelog-path": "CHANGELOG.md"
     }
   },
