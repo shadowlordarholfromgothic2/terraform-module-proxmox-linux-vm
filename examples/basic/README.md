@@ -12,9 +12,16 @@ so pin a release in both before this stops being an example.
 
 ```console
 $ export TF_VAR_proxmox_api_token='terraform@pve!tofu=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+$ export TF_VAR_ssh_public_key="$(cat ~/.ssh/id_ed25519.pub)"
 $ tofu init
 $ tofu plan
 ```
+
+`ssh_public_key` takes the key itself rather than a path to one. That is not
+style: `file()` is evaluated while the configuration graph is built, so a
+default path would make `validate`, `plan` and `tflint` fail on every machine
+that does not happen to have a key sitting at exactly that path — including
+CI.
 
 Unlike a provider that dials out when it is configured, `bpg/proxmox` does not
 contact the node until a resource is read or created — so `tofu plan` here
@@ -23,10 +30,10 @@ directory and never plans it. To exercise the module itself without a Proxmox
 node at all, use the tests in [../../tests](../../tests), which mock the
 provider.
 
-Every input has a default except `proxmox_api_token`, so a run against a node
-at `192.168.1.10` named `pve` needs only that one variable. The defaults are
-placeholders for a home network — check `proxmox_endpoint`, `proxmox_node` and
-the `vmbr0` bridge against your own before applying.
+Every input has a default except `proxmox_api_token` and `ssh_public_key`, so a
+run against a node at `192.168.1.10` named `pve` needs only those two. The
+defaults are placeholders for a home network — check `proxmox_endpoint`,
+`proxmox_node` and the `vmbr0` bridge against your own before applying.
 
 ## Two things that will bite
 

@@ -33,7 +33,7 @@ module "vm" {
   # Everything else is left at its default: 2 cores, 2048 MiB, a 20 GiB boot
   # disk on local-lvm, and one virtio NIC on vmbr0 taking a DHCP lease.
 
-  ssh_authorized_keys = [trimspace(file(pathexpand(var.ssh_public_key_path)))]
+  ssh_authorized_keys = [trimspace(var.ssh_public_key)]
 
   # The Debian generic cloud image does not ship qemu-guest-agent, and the
   # provider blocks on create and on every reboot waiting for an agent that

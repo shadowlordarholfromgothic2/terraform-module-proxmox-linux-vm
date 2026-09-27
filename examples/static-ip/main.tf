@@ -63,7 +63,7 @@ module "vm" {
   dns_servers = ["192.168.20.1"]
 
   username            = "admin"
-  ssh_authorized_keys = [trimspace(file(pathexpand(var.ssh_public_key_path)))]
+  ssh_authorized_keys = [trimspace(var.ssh_public_key)]
 
   # Start after the network and storage VMs on a node reboot, and give the
   # database a moment before whatever starts next.

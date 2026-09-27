@@ -11,11 +11,17 @@ Download it once — by hand, or by running [../basic](../basic) — and point
 
 ```console
 $ export TF_VAR_proxmox_api_token='terraform@pve!tofu=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+$ export TF_VAR_ssh_public_key="$(cat ~/.ssh/id_ed25519.pub)"
 $ tofu init
 $ tofu plan
 $ tofu apply
 $ ssh admin@192.168.20.10
 ```
+
+`ssh_public_key` takes the key itself rather than a path to one: `file()` is
+evaluated while the configuration graph is built, so a default path would make
+`validate`, `plan` and `tflint` fail on every machine without a key at exactly
+that path.
 
 The addresses, the VLAN and the datastore names are placeholders. Replace them
 before running this anywhere real: creating a VM on an address something else

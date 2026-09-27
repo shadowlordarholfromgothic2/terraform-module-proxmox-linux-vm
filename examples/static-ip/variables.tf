@@ -34,8 +34,15 @@ variable "data_datastore_id" {
   default     = "local-lvm"
 }
 
-variable "ssh_public_key_path" {
-  description = "Path to the public key installed for the admin account. The key material is read here, in the root module, so the child module never touches the filesystem."
+variable "ssh_public_key" {
+  description = "Public key line installed for the admin account, e.g. the contents of ~/.ssh/id_ed25519.pub. Supply it with `export TF_VAR_ssh_public_key=\"$(cat ~/.ssh/id_ed25519.pub)\"`."
   type        = string
-  default     = "~/.ssh/id_ed25519.pub"
+
+  # Deliberately a key, not a path to one: `file()` is evaluated while the
+  # configuration graph is built, so a default path would make `validate` and
+  # `tflint` fail on any machine that does not happen to have a key there.
+  validation {
+    condition     = can(regex("^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521))\\s+\\S+", trimspace(var.ssh_public_key)))
+    error_message = "ssh_public_key must be a full public key line such as \"ssh-ed25519 AAAA... comment\", not a path to one."
+  }
 }
