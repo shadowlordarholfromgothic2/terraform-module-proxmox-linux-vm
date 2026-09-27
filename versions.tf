@@ -6,12 +6,13 @@ terraform {
   # Provider *configuration* stays in the root module; a child module only
   # declares which providers it needs so it inherits the root's instances.
   #
-  # Pin exactly where the resource schema moves between minor releases, and use
-  # `~>` where the provider is stable enough to float.
+  # bpg/proxmox is pre-1.0 and moves its resource schema between minor
+  # releases — `network_device` turned from a block into a list attribute in
+  # 0.x, for one — so the constraint is held to a single minor.
   required_providers {
-    # example = {
-    #   source  = "namespace/example"
-    #   version = "1.2.3"
-    # }
+    proxmox = {
+      source  = "bpg/proxmox"
+      version = "~> 0.114.0"
+    }
   }
 }
