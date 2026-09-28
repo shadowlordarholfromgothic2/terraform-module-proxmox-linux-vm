@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/shadowlordarholfromgothic2/terraform-module-proxmox-linux-vm/compare/v0.2.0...v0.3.0) (2026-09-28)
+
+
+### Features
+
+* **config:** change persistant tags ([e3ce30b](https://github.com/shadowlordarholfromgothic2/terraform-module-proxmox-linux-vm/commit/e3ce30b50734005c02efc19e44f425bf7bdc9668))
+* **config:** change persistent tags ([b90dd56](https://github.com/shadowlordarholfromgothic2/terraform-module-proxmox-linux-vm/commit/b90dd56a0cb506022570c0e6340d343035030b4e))
+
 ## [0.2.0](https://github.com/shadowlordarholfromgothic2/terraform-module-proxmox-linux-vm/compare/v0.1.0...v0.2.0) (2026-09-28)
 
 
