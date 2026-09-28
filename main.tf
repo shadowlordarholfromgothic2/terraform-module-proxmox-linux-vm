@@ -8,7 +8,7 @@
 locals {
   # Tags/labels every resource in this module carries, so that a plan against an
   # untouched configuration stays empty.
-  common_tags = sort(distinct(concat(["opentofu", var.name], var.tags)))
+  common_tags = sort(distinct(concat(["terraform"], var.tags)))
 
   # `cloud_image` carries exactly one of file_id/url (enforced in variables.tf),
   # so at most one of these two is non-null and coalesce always resolves.
