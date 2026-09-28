@@ -608,7 +608,7 @@ variable "boot_order" {
 }
 
 variable "serial_device_enabled" {
-  description = "Attach a serial console. Most cloud images log their boot to it, so leaving this on is what makes `qm terminal` useful when the network config is wrong."
+  description = "Attach a serial console. Most cloud images log their boot to it, so turning this on is what makes `qm terminal` useful when the network config is wrong."
   type        = bool
   default     = false
 }

@@ -67,8 +67,8 @@ run "defaults_are_a_working_small_vm" {
   }
 
   assert {
-    condition     = proxmox_virtual_environment_vm.this.bios == "seabios" && length(proxmox_virtual_environment_vm.this.efi_disk) == 0
-    error_message = "seabios must not drag an EFI disk along."
+    condition     = proxmox_virtual_environment_vm.this.bios == null && length(proxmox_virtual_environment_vm.this.efi_disk) == 0
+    error_message = "Firmware must be left to the node default (seabios), and nothing but ovmf may bring an EFI disk."
   }
 
   assert {
@@ -82,8 +82,8 @@ run "defaults_are_a_working_small_vm" {
   }
 
   assert {
-    condition     = length(proxmox_virtual_environment_vm.this.serial_device) == 1
-    error_message = "A serial console must be attached by default: it is the only way in when the network config is wrong."
+    condition     = length(proxmox_virtual_environment_vm.this.serial_device) == 0
+    error_message = "The serial console is opt-in: the default machine must not carry a device nobody asked for."
   }
 
   assert {
@@ -593,8 +593,11 @@ run "a_custom_user_data_snippet_replaces_the_account_block" {
 # The snippet is asserted by decoding it rather than by matching text: YAML
 # comments and key order are not the contract, the resulting structure is.
 
+# Applied rather than planned: the uploaded snippet's `id` is computed, so the
+# mock only supplies it — and the VM's user_data_file_id only becomes known —
+# once the apply has run.
 run "a_snippet_carries_the_account_and_installs_the_agent" {
-  command = plan
+  command = apply
 
   variables {
     cloud_init_snippet  = {}
@@ -806,9 +809,12 @@ run "no_snippet_leaves_the_native_fields_in_charge" {
     error_message = "With no snippet and no file passed in, Proxmox must generate the user-data itself."
   }
 
+  # var.username is left at its default here, which is the other half of what
+  # this asserts. A failure prints "(sensitive value)" for the account: the file
+  # sets a password, and that mark spreads over the whole block on the way out.
   assert {
-    condition     = one(one(proxmox_virtual_environment_vm.this.initialization).user_account).username == "admin"
-    error_message = "The native user_account path must survive the snippet being opt-in."
+    condition     = one(one(proxmox_virtual_environment_vm.this.initialization).user_account).username == "ubuntu"
+    error_message = "The native user_account path must survive the snippet being opt-in, and must default to the ubuntu account."
   }
 }
 
@@ -827,7 +833,7 @@ run "lifecycle_inputs_reach_the_provider" {
     protection            = true
     stop_on_destroy       = false
     agent_enabled         = false
-    serial_device_enabled = false
+    serial_device_enabled = true
     memory_floating_mb    = 1024
     boot_order            = ["scsi0", "net0"]
     startup               = { order = 10, up_delay = 30 }
@@ -849,8 +855,8 @@ run "lifecycle_inputs_reach_the_provider" {
   }
 
   assert {
-    condition     = length(proxmox_virtual_environment_vm.this.serial_device) == 0
-    error_message = "serial_device_enabled = false must remove the serial console."
+    condition     = length(proxmox_virtual_environment_vm.this.serial_device) == 1
+    error_message = "serial_device_enabled = true must attach the serial console: it is the only way in when the network config is wrong."
   }
 
   assert {
