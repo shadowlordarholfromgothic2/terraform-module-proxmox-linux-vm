@@ -63,3 +63,10 @@ output "cloud_image_file_id" {
   description = "File ID of the image the boot disk was imported from, whether it was passed in or downloaded by this module."
   value       = local.cloud_image_file_id
 }
+
+# Which file the guest's user-data came from, so that a failed first boot can be
+# read back with `qm cloudinit dump <vmid> user` against a known snippet.
+output "cloud_init_user_data_file_id" {
+  description = "File ID of the user-data the VM boots with: the snippet this module uploaded, the file passed through cloud_init_file_ids, or null when Proxmox generated the config from its own fields."
+  value       = local.user_data_file_id
+}

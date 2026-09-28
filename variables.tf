@@ -384,7 +384,7 @@ variable "dns_servers" {
 variable "username" {
   description = "Login account cloud-init creates, with passwordless sudo. Set to null to skip account creation entirely, which is what you want when cloud_init_file_ids.user_data supplies its own users."
   type        = string
-  default     = "admin"
+  default     = "ubuntu"
   validation {
     condition     = var.username == null ? true : can(regex("^[a-z_][a-z0-9_-]{0,31}$", var.username))
     error_message = "username must be a valid Linux account name: lowercase, starting with a letter or underscore, at most 32 characters."
@@ -442,6 +442,67 @@ variable "cloud_init_file_ids" {
     network_data = optional(string)
   })
   default = {}
+}
+
+variable "cloud_init_snippet" {
+  description = "Render the user-data as a cloud-config snippet this module uploads, instead of leaving it to Proxmox. Null keeps Proxmox's own fields, which can create one account and nothing more — no packages, no commands. `{}` takes the defaults, which install and start qemu-guest-agent. Needs a datastore with the `snippets` content type and a working `ssh` block on the provider."
+  type = object({
+    datastore_id             = optional(string, "local")
+    file_name                = optional(string)
+    install_qemu_guest_agent = optional(bool, true)
+    package_update           = optional(bool, true)
+    package_upgrade          = optional(bool, false)
+    packages                 = optional(list(string), [])
+    runcmd                   = optional(list(string), [])
+    write_files = optional(list(object({
+      path        = string
+      content     = string
+      permissions = optional(string)
+      owner       = optional(string)
+      append      = optional(bool)
+    })), [])
+    manage_etc_hosts = optional(bool, true)
+    ssh_pwauth       = optional(bool)
+    extra_yaml       = optional(string)
+  })
+  default = null
+
+  validation {
+    condition     = var.cloud_init_snippet == null ? true : length(trimspace(var.cloud_init_snippet.datastore_id)) > 0
+    error_message = "cloud_init_snippet.datastore_id must not be empty; it has to name a datastore with the `snippets` content type enabled."
+  }
+
+  validation {
+    condition = var.cloud_init_snippet == null ? true : (
+      var.cloud_init_snippet.file_name == null
+      ? true
+      : can(regex("^[A-Za-z0-9][A-Za-z0-9._-]*$", var.cloud_init_snippet.file_name))
+    )
+    error_message = "cloud_init_snippet.file_name must be a bare file name of letters, digits, dots, dashes and underscores: it names a file inside the datastore's snippets directory, not a path to one."
+  }
+
+  validation {
+    condition     = var.cloud_init_snippet == null ? true : alltrue([for p in var.cloud_init_snippet.packages : length(trimspace(p)) > 0])
+    error_message = "cloud_init_snippet.packages must not hold empty entries."
+  }
+
+  validation {
+    condition     = var.cloud_init_snippet == null ? true : alltrue([for c in var.cloud_init_snippet.runcmd : length(trimspace(c)) > 0])
+    error_message = "cloud_init_snippet.runcmd must not hold empty entries."
+  }
+
+  validation {
+    condition     = var.cloud_init_snippet == null ? true : alltrue([for f in var.cloud_init_snippet.write_files : startswith(f.path, "/")])
+    error_message = "Every cloud_init_snippet.write_files path must be absolute: cloud-init has no working directory to resolve a relative one against."
+  }
+
+  validation {
+    condition = var.cloud_init_snippet == null ? true : alltrue([
+      for f in var.cloud_init_snippet.write_files :
+      f.permissions == null ? true : can(regex("^0[0-7]{3}$", f.permissions))
+    ])
+    error_message = "cloud_init_snippet.write_files permissions must be a four-digit octal string such as \"0644\" — YAML reads an unquoted 644 as decimal."
+  }
 }
 
 # --------------------------------------------------------------------------
@@ -505,9 +566,9 @@ variable "startup" {
 variable "bios" {
   description = "Firmware the VM boots with. `ovmf` also creates an EFI disk on datastore_id; the cloud image has to be UEFI-bootable."
   type        = string
-  default     = "seabios"
+  default     = null
   validation {
-    condition     = contains(["seabios", "ovmf"], var.bios)
+    condition     = var.bios == null ? true : contains(["seabios", "ovmf"], var.bios)
     error_message = "bios must be seabios or ovmf."
   }
 }
@@ -547,7 +608,7 @@ variable "boot_order" {
 }
 
 variable "serial_device_enabled" {
-  description = "Attach a serial console. Most cloud images log their boot to it, so leaving this on is what makes `qm terminal` useful when the network config is wrong."
+  description = "Attach a serial console. Most cloud images log their boot to it, so turning this on is what makes `qm terminal` useful when the network config is wrong."
   type        = bool
-  default     = true
+  default     = false
 }

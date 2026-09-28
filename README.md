@@ -27,11 +27,15 @@ downloads.
    data disk behind it.
 4. Attaches one NIC per entry in `network_devices`, in order, each with the
    bridge, MAC and VLAN that entry names.
-5. Attaches a cloud-init drive that sets the hostname to `name`, addresses each
-   NIC from the same `network_devices` entry, writes the resolver from
-   `dns_domain` and `dns_servers`, and creates `username` with
+5. Renders a cloud-config and uploads it as a snippet when `cloud_init_snippet`
+   is set, which is the only way to install a package — `qemu-guest-agent`
+   above all — or run a command on first boot.
+6. Attaches a cloud-init drive that sets the hostname to `name`, addresses each
+   NIC from the same `network_devices` entry, and writes the resolver from
+   `dns_domain` and `dns_servers`. The account comes from the snippet when there
+   is one, and otherwise from Proxmox's own fields, fed by `username`,
    `ssh_authorized_keys` and `password`.
-6. Starts the VM when `started` is true, and waits for the QEMU guest agent to
+7. Starts the VM when `started` is true, and waits for the QEMU guest agent to
    report its addresses when `agent_enabled` is true.
 
 ## Requirements
@@ -75,8 +79,14 @@ from the root module, which is where credentials belong.
   it every create and every reboot blocks until `agent_timeout` expires and
   then fails. Most distro cloud images do not ship it — install it through
   cloud-init, bake it into the image, or set `agent_enabled = false`.
-- **A datastore with the `snippets` content type** when you pass
-  `cloud_init_file_ids`. Proxmox does not enable it anywhere by default.
+- **A datastore with the `snippets` content type** when you set
+  `cloud_init_snippet` or pass `cloud_init_file_ids`. Proxmox does not enable it
+  anywhere by default: add it under *Datacenter > Storage > (the datastore) >
+  Content*.
+- **An `ssh` block on the provider** when you set `cloud_init_snippet`. Snippets
+  are the one content type the Proxmox API refuses an upload for, so the
+  provider writes them over SFTP as a user that can reach the datastore's
+  directory. Everything else this module does goes through the API.
 - **A free VM ID** when `vm_id` is set. Proxmox refuses to reuse one.
 
 ## Usage
@@ -89,6 +99,7 @@ edges written down:
 | --- | --- |
 | [examples/basic](examples/basic) | The smallest call: download an image, take a DHCP lease, take every other default. |
 | [examples/static-ip](examples/static-ip) | A fixed VM ID, a pinned MAC, a static address on a tagged VLAN, a separate data disk, and a boot order. |
+| [examples/cloud-init-snippet](examples/cloud-init-snippet) | A rendered cloud-config uploaded as a snippet: packages, commands, written files, and the guest agent that `agent_enabled` needs. |
 
 The first snippet is minimal — every other input takes its default, which
 produces a 2-core, 2 GiB, 20 GiB DHCP machine on `vmbr0`.
@@ -147,7 +158,6 @@ module "vm" {
   dns_domain  = "lan.example"
   dns_servers = ["192.168.20.1"]
 
-  username            = "admin"
   ssh_authorized_keys = [trimspace(file("~/.ssh/id_ed25519.pub"))]
 
   startup = { order = 10, up_delay = 30 }
@@ -208,6 +218,7 @@ defaults to `null` so the provider's own default stays in force.
 | `cloud_init_interface` | Bus the cloud-init drive attaches to. | `string` | `"ide2"` |
 | `cloud_init_upgrade` | Run a package upgrade on first boot. Null takes the provider default. | `bool` | `null` |
 | `cloud_init_file_ids` | Snippet file IDs overriding the generated config. See below. | `object` | `{}` |
+| `cloud_init_snippet` | Render and upload the user-data instead of leaving it to Proxmox. See below. | `object` | `null` |
 | `agent_enabled` | Tell Proxmox the QEMU guest agent is present. | `bool` | `true` |
 | `agent_timeout` | How long to wait for the agent, as a Go duration. | `string` | `"15m"` |
 | `started` | Keep the VM running. | `bool` | `true` |
@@ -215,12 +226,12 @@ defaults to `null` so the provider's own default stays in force.
 | `stop_on_destroy` | Hard-stop on destroy instead of a guest shutdown. | `bool` | `true` |
 | `protection` | Set the Proxmox protection flag, which blocks removal. | `bool` | `false` |
 | `startup` | Node boot ordering. See below. | `object` | `null` |
-| `bios` | `seabios` or `ovmf`; `ovmf` also creates an EFI disk. | `string` | `"seabios"` |
+| `bios` | `seabios` or `ovmf`; `ovmf` also creates an EFI disk. | `string` | `null` |
 | `machine` | QEMU machine type, e.g. `q35`. Null takes i440fx. | `string` | `null` |
 | `scsi_hardware` | SCSI controller model. | `string` | `"virtio-scsi-single"` |
 | `os_type` | Guest OS hint; `l26` covers every 2.6+ Linux kernel. | `string` | `"l26"` |
 | `boot_order` | Boot device order. Null boots from `disk_interface` alone. | `list(string)` | `null` |
-| `serial_device_enabled` | Attach a serial console. | `bool` | `true` |
+| `serial_device_enabled` | Attach a serial console. | `bool` | `false` |
 
 ### `cloud_image`
 
@@ -341,7 +352,85 @@ set `username = null` so the module stops asking for a login it no longer
 controls, and put your users in the snippet.
 
 Upload the snippet with `proxmox_virtual_environment_file` in the root module
-and feed its `id` in here.
+and feed its `id` in here. To have *this* module write the file instead, use
+`cloud_init_snippet`; the two are mutually exclusive, and a plan-time check says
+so rather than letting one silently win.
+
+### `cloud_init_snippet`
+
+```hcl
+object({
+  datastore_id             = optional(string, "local")  # needs the `snippets` content type
+  file_name                = optional(string)           # null derives it from `name`
+  install_qemu_guest_agent = optional(bool, true)
+  package_update           = optional(bool, true)
+  package_upgrade          = optional(bool, false)
+  packages                 = optional(list(string), [])
+  runcmd                   = optional(list(string), [])
+  write_files = optional(list(object({
+    path        = string
+    content     = string
+    permissions = optional(string)  # quoted octal, e.g. "0644"
+    owner       = optional(string)
+    append      = optional(bool)
+  })), [])
+  manage_etc_hosts = optional(bool, true)
+  ssh_pwauth       = optional(bool)   # null leaves sshd alone
+  extra_yaml       = optional(string) # appended verbatim as top-level keys
+})
+```
+
+Null — the default — leaves the user-data to Proxmox. Set it to `{}` to take the
+defaults, which is usually all you want:
+
+```hcl
+module "vm" {
+  # ...
+  username            = "admin"
+  ssh_authorized_keys = [trimspace(file("~/.ssh/id_ed25519.pub"))]
+
+  # Installs and starts qemu-guest-agent, so agent_enabled has something to
+  # talk to.
+  cloud_init_snippet = {}
+}
+```
+
+**Why this exists.** Proxmox's own cloud-init fields create an account and
+configure the network, and that is the whole of it — there is no way to install a
+package or run a command through them. `qemu-guest-agent` is the one every caller
+needs, because `agent_enabled` waits `agent_timeout` for an agent that a stock
+cloud image does not have. `install_qemu_guest_agent` is therefore on by default
+whenever the snippet is.
+
+**What the snippet has to restate.** Proxmox splits its generated config across
+user-data and network-data, and a snippet replaces only the user-data. So the
+module writes `hostname`, `fqdn` (from `dns_domain`) and `manage_etc_hosts` into
+the snippet itself, because those came from the file being replaced. The address
+and the resolver do not need restating: they live in the network-data, which
+Proxmox still generates from `network_devices`, `dns_domain` and `dns_servers`.
+`cloud_init_upgrade` is the exception that cannot be carried over — it sets a
+Proxmox field that only affects Proxmox's own user-data — so a plan-time check
+rejects it here and points at `package_upgrade`.
+
+**Passwords.** `password` reaches the guest as `hashed_passwd` when it looks like
+a crypt hash (`$1$`, `$2a$`, `$2b$`, `$2y$`, `$5$`, `$6$`, `$7$`, `$y$`, `$gy$`)
+and as `plain_text_passwd` otherwise. This is the reason to prefer the snippet
+when you hash passwords yourself: Proxmox's `cipassword` hashes whatever it is
+handed unless it recognises the prefix, and it does not recognise `$y$` yescrypt
+— the hash gets hashed again, and the password that works is the literal hash
+string. Through the snippet a hash is passed through byte for byte.
+
+An account with a password is written with `lock_passwd: false`, because
+cloud-init otherwise locks it and refuses every password login. An account with
+only keys stays locked, which costs nothing: key logins and `NOPASSWD` sudo both
+work against a locked account. Note that Ubuntu and Debian cloud images ship
+`PasswordAuthentication no`, so a password is a console login until you also set
+`ssh_pwauth = true`.
+
+**`extra_yaml` is appended, not merged.** It is concatenated onto the rendered
+config as top-level cloud-config keys, so a key it repeats becomes a duplicate
+YAML key rather than an override. Use it for keys this object does not model
+(`timezone`, `apt`, `ca_certs`), not to change one it does.
 
 ### `startup`
 
@@ -371,6 +460,7 @@ is different from giving it a high order.
 | `network_interface_names` | Interface names inside the guest, from the guest agent. | no |
 | `configured_ipv4_address` | First NIC's static IPv4 without its prefix, or null on DHCP. | no |
 | `cloud_image_file_id` | File ID the boot disk was imported from. | no |
+| `cloud_init_user_data_file_id` | File ID of the user-data the guest read, or null when Proxmox generated it. | no |
 
 `configured_ipv4_address` is known at plan time and the agent-reported outputs
 are not, so a DNS record or an inventory entry that depends on the latter
@@ -385,6 +475,7 @@ plain text, as are the public keys. Use a backend that encrypts state.
 | Address | Purpose |
 | --- | --- |
 | `proxmox_download_file.cloud_image[0]` | The cloud image, fetched onto the node. Only created when `cloud_image.url` is set. |
+| `proxmox_virtual_environment_file.user_data[0]` | The rendered cloud-config, uploaded as a snippet. Only created when `cloud_init_snippet` is set. |
 | `proxmox_virtual_environment_vm.this` | The VM, its disks, its NICs and its cloud-init drive. |
 
 ## Baked-in decisions
@@ -394,10 +485,18 @@ plain text, as are the public keys. Use a backend that encrypts state.
   the module's output depend on a mutable object in the cluster that Terraform
   did not create. Importing from an image with a checksum makes the same
   configuration produce the same machine on any node.
-- **Account creation goes through Proxmox's cloud-init fields, not a generated
-  snippet.** A snippet would be more expressive, but it needs a datastore with
-  the `snippets` content type enabled, which no Proxmox install has by default.
-  `cloud_init_file_ids` is the way out when you need the expressiveness.
+- **Account creation goes through Proxmox's cloud-init fields by default, and
+  through a rendered snippet on request.** The native fields need nothing set up
+  on the node, which is why they are the default, but they stop at creating one
+  account: there is no `packages`, no `runcmd`, no `write_files`. Anything past
+  that needs a real cloud-config, so `cloud_init_snippet` renders one and uploads
+  it — at the cost of a datastore with the `snippets` content type and an `ssh`
+  block on the provider. `cloud_init_file_ids` remains the way to supply a file
+  this module did not write.
+- **The snippet is rendered with `yamlencode`, not from a template file.** A
+  here-doc or a `.tftpl` has to get its own quoting and indentation right for
+  every value that passes through it, and an SSH key or a `$`-laden password hash
+  is exactly the value that breaks one. `yamlencode` cannot emit invalid YAML.
 - **The EFI disk is `4m` with `pre_enrolled_keys = false`.** Enrolling
   Microsoft's keys turns on Secure Boot, and distro cloud images are a coin
   flip on whether they are signed for it. Off boots; on sometimes does not.
@@ -422,6 +521,14 @@ plain text, as are the public keys. Use a backend that encrypts state.
 - **Changing `vm_id` replaces the VM,** and so does changing `node_name` unless
   `migrate = true`. The disks go with it. Anything stored only on those disks
   is gone — this is the change to look for in a plan.
+- **Editing `cloud_init_snippet` re-uploads the file; it does not rebuild the
+  VM.** The file ID is derived from `name`, so the ID stays put while the contents
+  change, and the VM sees an in-place update. That also means a *booted* guest
+  ignores the change: cloud-init has already run. A snippet edit that has to take
+  effect needs `-replace` on the VM, or a rebuild.
+- **Changing `cloud_init_snippet.file_name` or `.datastore_id` replaces the VM,**
+  because both change the file ID, and the provider marks that as forcing
+  replacement.
 - **Changing any `cloud_init_file_ids` entry replaces the VM.** The provider
   marks all four snippet IDs as forcing replacement, so pointing `user_data` at
   a new snippet is a rebuild. Editing the snippet's *contents* under the same
@@ -447,7 +554,12 @@ plain text, as are the public keys. Use a backend that encrypts state.
 - **`agent_enabled = true` against an image without the agent hangs the
   apply.** It waits `agent_timeout` — 15 minutes by default — on create and on
   every reboot, then fails. If an apply is stuck at "still creating" with no
-  error, this is why.
+  error, this is why. Most distro cloud images do not ship the agent, so one of
+  three things has to be true: `cloud_init_snippet` installs it (the default when
+  the snippet is on), the image already carries it, or `agent_enabled` is false.
+  Installing it through the snippet means the create has to finish a package
+  install inside `agent_timeout`, so the guest needs a working route to its
+  mirrors before that clock runs out.
 - **`protection = true` makes `destroy` fail.** Clearing it is its own apply,
   which has to finish before the destroy can start. That is the point of the
   flag, but it means a teardown is two steps.

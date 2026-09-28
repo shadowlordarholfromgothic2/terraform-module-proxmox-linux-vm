@@ -9,7 +9,15 @@
 # validation that ever stops rejecting what it should would otherwise fail with
 # a provider error instead of the "expected failure" message that explains what
 # broke.
-mock_provider "proxmox" {}
+mock_provider "proxmox" {
+  # The snippet's `id` flows into the VM's `user_data_file_id`, where the
+  # provider validates it as a Proxmox file ID; an invented one is rejected.
+  mock_resource "proxmox_virtual_environment_file" {
+    defaults = {
+      id = "local:snippets/test-vm-user-data.yaml"
+    }
+  }
+}
 
 # The smallest valid call. Each run below overrides exactly one input, so a
 # failure names the rule that fired rather than the first one in the file.
@@ -399,10 +407,62 @@ run "rejects_empty_boot_order" {
   expect_failures = [var.boot_order]
 }
 
+# --- cloud-init snippet --------------------------------------------------
+
+run "rejects_empty_snippet_datastore_id" {
+  command = plan
+  variables { cloud_init_snippet = { datastore_id = "  " } }
+
+  expect_failures = [var.cloud_init_snippet]
+}
+
+run "rejects_a_path_as_a_snippet_file_name" {
+  command = plan
+  variables { cloud_init_snippet = { file_name = "snippets/user-data.yaml" } }
+
+  expect_failures = [var.cloud_init_snippet]
+}
+
+run "rejects_an_empty_package_entry" {
+  command = plan
+  variables { cloud_init_snippet = { packages = ["jq", ""] } }
+
+  expect_failures = [var.cloud_init_snippet]
+}
+
+run "rejects_an_empty_runcmd_entry" {
+  command = plan
+  variables { cloud_init_snippet = { runcmd = [" "] } }
+
+  expect_failures = [var.cloud_init_snippet]
+}
+
+run "rejects_a_relative_write_files_path" {
+  command = plan
+  variables {
+    cloud_init_snippet = {
+      write_files = [{ path = "etc/motd", content = "hello" }]
+    }
+  }
+
+  expect_failures = [var.cloud_init_snippet]
+}
+
+run "rejects_three_digit_write_files_permissions" {
+  command = plan
+  variables {
+    cloud_init_snippet = {
+      write_files = [{ path = "/etc/motd", content = "hello", permissions = "644" }]
+    }
+  }
+
+  expect_failures = [var.cloud_init_snippet]
+}
+
 # --- preconditions -------------------------------------------------------
 #
-# These two span more than one variable, so they live on the resource rather
-# than in variables.tf, and they fail during the plan instead of before it.
+# These span more than one variable, so they live on the resource rather than
+# in variables.tf, and they fail during the plan instead of before it.
 
 run "rejects_an_account_with_no_way_to_log_in" {
   command = plan
@@ -430,6 +490,36 @@ run "rejects_a_data_disk_on_the_boot_bus" {
   variables {
     disk_interface   = "scsi0"
     additional_disks = [{ interface = "scsi0", size_gb = 10 }]
+  }
+
+  expect_failures = [proxmox_virtual_environment_vm.this]
+}
+
+run "rejects_a_snippet_and_a_user_data_file_together" {
+  command = plan
+  variables {
+    cloud_init_snippet  = {}
+    cloud_init_file_ids = { user_data = "local:snippets/mine.yaml" }
+  }
+
+  expect_failures = [proxmox_virtual_environment_vm.this]
+}
+
+run "rejects_a_snippet_with_no_account_to_create" {
+  command = plan
+  variables {
+    cloud_init_snippet = {}
+    username           = null
+  }
+
+  expect_failures = [proxmox_virtual_environment_vm.this]
+}
+
+run "rejects_cloud_init_upgrade_alongside_a_snippet" {
+  command = plan
+  variables {
+    cloud_init_snippet = {}
+    cloud_init_upgrade = true
   }
 
   expect_failures = [proxmox_virtual_environment_vm.this]

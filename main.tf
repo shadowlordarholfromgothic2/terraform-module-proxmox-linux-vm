@@ -100,6 +100,118 @@ locals {
   # cloud-init only writes a DNS section when there is something to write;
   # otherwise the guest inherits whatever the Proxmox host hands out.
   dns_configured = var.dns_domain != null || length(var.dns_servers) > 0
+
+  # --- cloud-init user-data ------------------------------------------------
+  #
+  # Proxmox generates the user-data from its own fields unless something hands
+  # it a file, and those fields stop at creating one account: there is no way to
+  # install a package or run a command through them. That is what the snippet is
+  # for — `qemu-guest-agent` above all, because `agent_enabled` otherwise waits
+  # `agent_timeout` for an agent the image never had.
+  snippet = var.cloud_init_snippet
+
+  # Whether the user-data comes from a file is decided by the configuration, not
+  # by the upload: the file's `id` is unknown until apply, and a `for_each`
+  # cannot wait for that.
+  user_data_is_external = var.cloud_init_file_ids.user_data != null || var.cloud_init_snippet != null
+
+  user_data_file_id = (
+    var.cloud_init_file_ids.user_data != null
+    ? var.cloud_init_file_ids.user_data
+    : one(proxmox_virtual_environment_file.user_data[*].id)
+  )
+
+  # Installing the agent and starting it are two different things. `runcmd` runs
+  # in cloud-init's final stage, after the package module, so the unit exists by
+  # the time this fires; on an image that already shipped it, enabling an enabled
+  # unit is a no-op.
+  snippet_packages = local.snippet == null ? [] : distinct(concat(
+    local.snippet.install_qemu_guest_agent ? ["qemu-guest-agent"] : [],
+    local.snippet.packages,
+  ))
+
+  snippet_runcmd = local.snippet == null ? [] : concat(
+    local.snippet.install_qemu_guest_agent ? ["systemctl enable --now qemu-guest-agent"] : [],
+    local.snippet.runcmd,
+  )
+
+  # cloud-init takes a hash under `hashed_passwd` and a plaintext password under
+  # `plain_text_passwd`, and a value written to the wrong one of the two leaves
+  # the account unusable without reporting anything. Proxmox's own `cipassword`
+  # hashes whatever it is handed unless it recognises the prefix — `$y$`
+  # yescrypt it does not — which is the reason a pre-hashed password has to
+  # come through the snippet instead.
+  password_is_hashed = var.password == null ? false : can(regex("^[$](1|2a|2b|2y|5|6|7|y|gy)[$]", var.password))
+
+  snippet_user = local.snippet == null || var.username == null ? null : merge(
+    {
+      name   = var.username
+      groups = ["sudo"]
+      shell  = "/bin/bash"
+      sudo   = "ALL=(ALL) NOPASSWD:ALL"
+
+      # cloud-init locks the account by default, which puts a `!` in front of the
+      # hash and refuses every password login. Keys are unaffected either way, so
+      # this only has to be off when there is a password to use.
+      lock_passwd = var.password == null
+    },
+    length(var.ssh_authorized_keys) == 0 ? {} : { ssh_authorized_keys = var.ssh_authorized_keys },
+    var.password == null ? {} : (
+      local.password_is_hashed
+      ? { hashed_passwd = var.password }
+      : { plain_text_passwd = var.password }
+    ),
+  )
+
+  snippet_write_files = local.snippet == null ? [] : [
+    for f in local.snippet.write_files : merge(
+      { path = f.path, content = f.content },
+      f.permissions == null ? {} : { permissions = f.permissions },
+      f.owner == null ? {} : { owner = f.owner },
+      f.append == null ? {} : { append = f.append },
+    )
+  ]
+
+  # Assembled as text rather than as one object: every section is a top-level
+  # cloud-config mapping, so `yamlencode` per section concatenates into valid
+  # YAML, and a conditional that yields a string unifies where one yielding an
+  # object of a different shape would not.
+  #
+  # cloud-init reads a file with no `#cloud-config` line as a shell script, and
+  # `yamlencode` cannot emit a comment.
+  snippet_user_data = local.snippet == null ? null : join("", compact([
+    "#cloud-config\n",
+
+    # Proxmox writes the hostname into the user-data it generates, and a snippet
+    # replaces that file whole, so what it carried is restated here. The address
+    # and the resolver are not: those live in the network-data, which Proxmox
+    # still generates from `network_devices` and `dns_*`.
+    yamlencode(merge(
+      {
+        hostname         = var.name
+        manage_etc_hosts = local.snippet.manage_etc_hosts
+        package_update   = local.snippet.package_update
+        package_upgrade  = local.snippet.package_upgrade
+      },
+      var.dns_domain == null ? {} : { fqdn = "${var.name}.${var.dns_domain}" },
+    )),
+
+    local.snippet_user == null ? "" : yamlencode({
+      users = [local.snippet_user]
+
+      # Otherwise the first login is an expired-password prompt.
+      chpasswd = { expire = false }
+    }),
+
+    length(local.snippet_packages) == 0 ? "" : yamlencode({ packages = local.snippet_packages }),
+    length(local.snippet_runcmd) == 0 ? "" : yamlencode({ runcmd = local.snippet_runcmd }),
+    length(local.snippet_write_files) == 0 ? "" : yamlencode({ write_files = local.snippet_write_files }),
+    local.snippet.ssh_pwauth == null ? "" : yamlencode({ ssh_pwauth = local.snippet.ssh_pwauth }),
+
+    # Appended, not merged: a key this repeats becomes a duplicate YAML key
+    # rather than an override.
+    local.snippet.extra_yaml == null ? "" : "${trimspace(local.snippet.extra_yaml)}\n",
+  ]))
 }
 
 # Downloading the image is opt-in: skipped when the caller points at a file that
@@ -119,6 +231,28 @@ resource "proxmox_download_file" "cloud_image" {
   decompression_algorithm = var.cloud_image.decompression_algorithm
   overwrite               = var.cloud_image.overwrite
   upload_timeout          = var.cloud_image.upload_timeout
+}
+
+# Snippets are the one content type the Proxmox API refuses an upload for, so the
+# provider writes this over SSH — the provider needs an `ssh` block, and the
+# datastore needs `snippets` added to its content types, which Proxmox does
+# nowhere by default.
+resource "proxmox_virtual_environment_file" "user_data" {
+  count = var.cloud_init_snippet == null ? 0 : 1
+
+  node_name    = var.node_name
+  datastore_id = var.cloud_init_snippet.datastore_id
+  content_type = "snippets"
+
+  source_raw {
+    data = local.snippet_user_data
+
+    # The file ID is built from this name and changing the ID replaces the VM, so
+    # deriving it from `name` keeps an edit to the config's *contents* an
+    # in-place re-upload. A booted guest will not pick that up either way:
+    # cloud-init has already run.
+    file_name = coalesce(var.cloud_init_snippet.file_name, "${var.name}-user-data.yaml")
+  }
 }
 
 resource "proxmox_virtual_environment_vm" "this" {
@@ -209,7 +343,7 @@ resource "proxmox_virtual_environment_vm" "this" {
     interface    = var.cloud_init_interface
     upgrade      = var.cloud_init_upgrade
 
-    user_data_file_id    = var.cloud_init_file_ids.user_data
+    user_data_file_id    = local.user_data_file_id
     vendor_data_file_id  = var.cloud_init_file_ids.vendor_data
     meta_data_file_id    = var.cloud_init_file_ids.meta_data
     network_data_file_id = var.cloud_init_file_ids.network_data
@@ -244,8 +378,10 @@ resource "proxmox_virtual_environment_vm" "this" {
       }
     }
 
+    # Proxmox generates no user-data of its own once a file supplies it, so these
+    # fields would be accepted and then silently ignored.
     dynamic "user_account" {
-      for_each = var.username == null ? [] : [1]
+      for_each = var.username == null || local.user_data_is_external ? [] : [1]
       content {
         username = var.username
         keys     = var.ssh_authorized_keys
@@ -265,6 +401,21 @@ resource "proxmox_virtual_environment_vm" "this" {
     precondition {
       condition     = length(distinct(local.occupied_interfaces)) == length(local.occupied_interfaces)
       error_message = "disk_interface, cloud_init_interface and every additional_disks interface must be distinct; got ${join(", ", local.occupied_interfaces)}."
+    }
+
+    precondition {
+      condition     = var.cloud_init_snippet == null || var.cloud_init_file_ids.user_data == null
+      error_message = "cloud_init_snippet and cloud_init_file_ids.user_data both supply the user-data, and only one file reaches the guest. Keep cloud_init_snippet to have this module render the config, or cloud_init_file_ids.user_data to point at a file you manage yourself."
+    }
+
+    precondition {
+      condition     = var.cloud_init_snippet == null || var.username != null
+      error_message = "cloud_init_snippet renders the account into the config it generates, so it needs username. To define users some other way, drop cloud_init_snippet and pass your own file through cloud_init_file_ids.user_data."
+    }
+
+    precondition {
+      condition     = var.cloud_init_snippet == null || var.cloud_init_upgrade == null
+      error_message = "cloud_init_upgrade only reaches the config Proxmox generates, and cloud_init_snippet replaces that config: set cloud_init_snippet.package_upgrade instead."
     }
   }
 }
