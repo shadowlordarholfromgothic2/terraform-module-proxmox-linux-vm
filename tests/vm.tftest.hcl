@@ -149,14 +149,14 @@ run "tags_are_sorted_deduplicated_and_marked" {
 
   variables {
     name = "web-01"
-    # "opentofu" and the name repeated on purpose: a caller passing them again
+    # "terraform" and the name repeated on purpose: a caller passing them again
     # must not produce a duplicate, which Proxmox would reject.
-    tags = ["web", "debian", "opentofu", "web-01"]
+    tags = ["web", "debian", "terraform", "web-01"]
   }
 
   assert {
-    condition     = proxmox_virtual_environment_vm.this.tags == tolist(["debian", "opentofu", "web", "web-01"])
-    error_message = "Tags must be sorted and deduplicated, and always carry opentofu plus the deployment name."
+    condition     = proxmox_virtual_environment_vm.this.tags == tolist(["debian", "terraform", "web", "web-01"])
+    error_message = "Tags must be sorted and deduplicated, and always carry terraform plus the deployment name."
   }
 }
 
