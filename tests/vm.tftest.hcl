@@ -16,6 +16,14 @@ mock_provider "proxmox" {
       id = "local:iso/debian-12-genericcloud-amd64.img"
     }
   }
+
+  # Same reason: the uploaded snippet's `id` flows into the VM's
+  # `user_data_file_id`, where the provider validates it as a Proxmox file ID.
+  mock_resource "proxmox_virtual_environment_file" {
+    defaults = {
+      id = "local:snippets/test-vm-user-data.yaml"
+    }
+  }
 }
 
 variables {
@@ -577,6 +585,230 @@ run "a_custom_user_data_snippet_replaces_the_account_block" {
   assert {
     condition     = output.username == null
     error_message = "The username output must be null when the module creates no account."
+  }
+}
+
+# --- the rendered cloud-config snippet ------------------------------------
+#
+# The snippet is asserted by decoding it rather than by matching text: YAML
+# comments and key order are not the contract, the resulting structure is.
+
+run "a_snippet_carries_the_account_and_installs_the_agent" {
+  command = plan
+
+  variables {
+    cloud_init_snippet  = {}
+    username            = "admin"
+    password            = null
+    ssh_authorized_keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyDataHere kirgo@workstation"]
+  }
+
+  assert {
+    condition     = one(proxmox_virtual_environment_file.user_data[0].source_raw).file_name == "test-vm-user-data.yaml"
+    error_message = "The snippet's file name must default to the deployment name, so that editing its contents is not a VM replacement."
+  }
+
+  assert {
+    condition     = proxmox_virtual_environment_file.user_data[0].content_type == "snippets" && proxmox_virtual_environment_file.user_data[0].datastore_id == "local"
+    error_message = "The snippet must be uploaded as the snippets content type, to `local` by default."
+  }
+
+  assert {
+    condition     = startswith(one(proxmox_virtual_environment_file.user_data[0].source_raw).data, "#cloud-config\n")
+    error_message = "Without the #cloud-config line cloud-init reads the file as a shell script."
+  }
+
+  assert {
+    condition     = yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).hostname == "test-vm"
+    error_message = "A snippet replaces the user-data Proxmox would have generated, so it has to carry the hostname itself."
+  }
+
+  assert {
+    condition     = contains(yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).packages, "qemu-guest-agent")
+    error_message = "Installing qemu-guest-agent is the reason the snippet exists: agent_enabled waits on it."
+  }
+
+  assert {
+    condition     = contains(yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).runcmd, "systemctl enable --now qemu-guest-agent")
+    error_message = "Installing the agent does not start it; the snippet has to."
+  }
+
+  assert {
+    condition = (
+      length(yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).users) == 1 &&
+      yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).users[0].name == "admin"
+    )
+    error_message = "The snippet must create var.username, and only that account."
+  }
+
+  assert {
+    condition     = yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).users[0].sudo == "ALL=(ALL) NOPASSWD:ALL"
+    error_message = "The account the module creates has passwordless sudo, whichever path creates it."
+  }
+
+  assert {
+    condition     = length(yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).users[0].ssh_authorized_keys) == 1
+    error_message = "ssh_authorized_keys must reach the account through the snippet too."
+  }
+
+  assert {
+    condition     = yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).users[0].lock_passwd
+    error_message = "With no password set the account must stay locked; the keys are the way in."
+  }
+
+  assert {
+    condition     = length(one(proxmox_virtual_environment_vm.this.initialization).user_account) == 0
+    error_message = "Proxmox ignores its own user_account fields once a file supplies the user-data, so the module must stop emitting the block."
+  }
+
+  assert {
+    condition     = one(proxmox_virtual_environment_vm.this.initialization).user_data_file_id == proxmox_virtual_environment_file.user_data[0].id
+    error_message = "The uploaded snippet must be the file the VM boots its cloud-init from."
+  }
+
+  assert {
+    condition     = output.cloud_init_user_data_file_id == proxmox_virtual_environment_file.user_data[0].id
+    error_message = "The output must name the file the guest actually read."
+  }
+}
+
+# The whole point of rendering the config here: Proxmox's cipassword hashes
+# whatever it is handed unless it recognises the prefix, and it does not
+# recognise yescrypt.
+run "a_hashed_password_reaches_the_guest_unchanged" {
+  command = plan
+
+  variables {
+    cloud_init_snippet = {}
+    username           = "admin"
+    password           = "$y$j9T$yjdfqfQoMNJEINWQQQryr1$XTCTi/ov1vAF99BPgK8s2D0IkdDOKH75iwebiaqL227"
+  }
+
+  assert {
+    condition     = yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).users[0].hashed_passwd == "$y$j9T$yjdfqfQoMNJEINWQQQryr1$XTCTi/ov1vAF99BPgK8s2D0IkdDOKH75iwebiaqL227"
+    error_message = "A crypt hash must go in under hashed_passwd, byte for byte."
+  }
+
+  assert {
+    condition     = !yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).users[0].lock_passwd
+    error_message = "An account with a password must be unlocked, or every password login is refused."
+  }
+
+  assert {
+    condition     = !yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).chpasswd.expire
+    error_message = "Without chpasswd.expire = false the first login is an expired-password prompt."
+  }
+}
+
+run "a_plaintext_password_goes_in_as_plaintext" {
+  command = plan
+
+  variables {
+    cloud_init_snippet = {}
+    username           = "admin"
+    password           = "example-password"
+  }
+
+  assert {
+    condition = (
+      yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).users[0].plain_text_passwd == "example-password" &&
+      !can(yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).users[0].hashed_passwd)
+    )
+    error_message = "A password that is not a crypt hash must go in under plain_text_passwd; cloud-init reads hashed_passwd as a hash and would leave the account unusable."
+  }
+}
+
+run "snippet_extras_reach_the_cloud_config" {
+  command = plan
+
+  variables {
+    username   = "admin"
+    dns_domain = "lan.example"
+    cloud_init_snippet = {
+      datastore_id             = "tank"
+      file_name                = "db-01-ci.yaml"
+      install_qemu_guest_agent = false
+      package_upgrade          = true
+      packages                 = ["postgresql-16", "jq"]
+      runcmd                   = ["systemctl enable postgresql"]
+      ssh_pwauth               = false
+      write_files = [
+        {
+          path        = "/etc/sysctl.d/99-db.conf"
+          content     = "vm.swappiness = 1\n"
+          permissions = "0644"
+        },
+      ]
+      extra_yaml = "timezone: Europe/Berlin"
+    }
+  }
+
+  assert {
+    condition     = proxmox_virtual_environment_file.user_data[0].datastore_id == "tank" && one(proxmox_virtual_environment_file.user_data[0].source_raw).file_name == "db-01-ci.yaml"
+    error_message = "The snippet's datastore and file name must be overridable."
+  }
+
+  assert {
+    condition     = yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).fqdn == "test-vm.lan.example"
+    error_message = "dns_domain must reach the snippet as the fqdn, the way Proxmox would have written it."
+  }
+
+  assert {
+    condition     = yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).packages == ["postgresql-16", "jq"]
+    error_message = "install_qemu_guest_agent = false must leave the agent out and the caller's packages in, in order."
+  }
+
+  assert {
+    condition     = yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).runcmd == ["systemctl enable postgresql"]
+    error_message = "install_qemu_guest_agent = false must not prepend the agent's start command."
+  }
+
+  assert {
+    condition = (
+      yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).package_upgrade &&
+      yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).package_update
+    )
+    error_message = "package_upgrade must reach the config, and package_update has to be on or the install runs against a stale index."
+  }
+
+  assert {
+    condition = (
+      yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).write_files[0].path == "/etc/sysctl.d/99-db.conf" &&
+      yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).write_files[0].permissions == "0644"
+    )
+    error_message = "write_files must reach the config with its permissions kept a string."
+  }
+
+  assert {
+    condition     = yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).ssh_pwauth == false
+    error_message = "ssh_pwauth must reach the config: an Ubuntu cloud image ships with password logins off, so a password alone is a console-only login."
+  }
+
+  assert {
+    condition     = yamldecode(one(proxmox_virtual_environment_file.user_data[0].source_raw).data).timezone == "Europe/Berlin"
+    error_message = "extra_yaml must be appended to the config as top-level cloud-config keys."
+  }
+}
+
+run "no_snippet_leaves_the_native_fields_in_charge" {
+  command = plan
+
+  assert {
+    condition     = length(proxmox_virtual_environment_file.user_data) == 0
+    error_message = "Nothing may be uploaded when cloud_init_snippet is null: the snippets content type is off by default and the upload would fail."
+  }
+
+  # Asserted on the module's own value rather than on the resource: the provider
+  # marks user_data_file_id optional *and* computed, so the mock invents one when
+  # the configuration leaves it unset.
+  assert {
+    condition     = local.user_data_file_id == null
+    error_message = "With no snippet and no file passed in, Proxmox must generate the user-data itself."
+  }
+
+  assert {
+    condition     = one(one(proxmox_virtual_environment_vm.this.initialization).user_account).username == "admin"
+    error_message = "The native user_account path must survive the snippet being opt-in."
   }
 }
 
